@@ -1,0 +1,50 @@
+name: chatmoney
+x-runtime: &runtime
+  DATABASE_URL: postgresql+psycopg://cm_runtime:${PG_APP_PASSWORD:?set PG_APP_PASSWORD}@db:5432/chatmoney
+  LLM_BACKEND: ${LLM_BACKEND:-mock}
+  CHATMONEY_CREDENTIAL_ENCRYPTION_KEY: ${CHATMONEY_CREDENTIAL_ENCRYPTION_KEY:-}
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: chatmoney
+      POSTGRES_USER: cm_owner
+      POSTGRES_PASSWORD: ${PG_OWNER_PASSWORD:?set PG_OWNER_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cm_owner -d chatmoney"]
+      interval: 4s
+      timeout: 3s
+      retries: 20
+  init:
+    build: .
+    environment:
+      <<: *runtime
+      MIGRATION_DATABASE_URL: postgresql+psycopg://cm_owner:${PG_OWNER_PASSWORD:?set PG_OWNER_PASSWORD}@db:5432/chatmoney
+    depends_on:
+      db: {condition: service_healthy}
+    volumes:
+      - ./.runtime:/engine/.runtime
+    command: ["sh","-ec","python -m scripts.bootstrap && python -m scripts.seed --tokens-file .runtime/compose-tokens.json"]
+  api:
+    build: .
+    restart: unless-stopped
+    environment: *runtime
+    depends_on:
+      init: {condition: service_completed_successfully}
+    ports: ["127.0.0.1:${API_PORT:-8000}:8000"]
+    healthcheck:
+      test: ["CMD","python","-c","import urllib.request; urllib.request.urlopen('http://localhost:8000/openapi.json',timeout=3)"]
+      interval: 15s
+      timeout: 4s
+      retries: 4
+  worker:
+    build: .
+    restart: unless-stopped
+    environment: *runtime
+    depends_on:
+      init: {condition: service_completed_successfully}
+    command: ["python","-m","app.worker"]
+volumes:
+  pgdata:
