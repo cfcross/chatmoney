@@ -21,7 +21,15 @@ class MockLLM:
         msg = req.current_message
         info = req.context
         result = {}
-        if req.mode == "json":
+        if info.get("research_selection") and req.mode == "json":
+            def score(x):
+                return (sum(1 for ch in set(msg.lower()) if ch.isalnum() and ch in x["quote"].lower()), -int(x["id"][1:]))
+            result["structured_output"] = {"evidence_id":max(info["company"],key=score)["id"], "product_id":max(info["product"],key=score)["id"], "approach":"核实方向"}
+        elif info.get("practice_role") == "buyer":
+            from app.practice.personas import demo_buyer
+
+            result["text"] = demo_buyer(req)
+        elif req.mode == "json":
             facts = {}
             for key, pattern in [
                 ("seats", r"(\d+)\s*(?:个)?(?:账号|席位)"),

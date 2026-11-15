@@ -1,8 +1,10 @@
-# ChatMoney 共享 Agent 引擎 V1.1
+# ChatMoney 团队工作台 V1.4 与共享 Agent 引擎
 
 销售和客服用同一套 HTTP 接口处理客户来信。吴姐发布的角色版本决定用哪款产品的资料、工具和规则。运行一轮后，业务端会得到答复草稿、模拟渠道回执或人工工单。[完整接口契约](docs/architecture/ChatMoney_Agent引擎开发方案与API接口规范_V1.0.md) · [开发与验收报告](docs/implementation/ChatMoney_Agent引擎V1.0开发与验收报告.md)
 
-吴姐和组员用各自的账号和密码进入[加密工作台](https://localhost:8443/console)。每个账号均可在“助手管理 → 我的模型连接”添加自己的 DeepSeek 密钥，并供自己创建的多个助手选择。管理员和普通成员的连接及使用授权彼此独立。管理员在“企业与产品资料库”目录可直接编辑、删除整库，进入“管理文件”可操作单个文件。普通成员只读已发布资料。模型可真实调用，消息渠道仍为模拟渠道。[中文使用指南](docs/implementation/ChatMoney_Agent中文管理界面使用指南.md) · [模型连接配置与启动](docs/implementation/ChatMoney_企业模型连接与DeepSeek配置指南.md) · [模型连接接口](https://localhost:8443/api/model-admin/v1/docs)
+吴姐和组员用各自的账号和密码进入[团队工作台](https://agent.heiling.tech/console)。工作台和后台任务在团队服务器上运行，开发电脑可以关机。每个账号均可在“助手管理 → 我的模型连接”添加自己的 DeepSeek 密钥，并供自己创建的多个助手选择。管理员和普通成员的连接及使用授权彼此独立。管理员在“企业与产品资料库”目录可直接编辑、删除整库，进入“管理文件”可操作单个文件。普通成员只读已发布资料。模型可真实调用，消息渠道仍为模拟渠道。[团队入口与维护](docs/implementation/ChatMoney_团队域名接入.md) · [中文使用指南](docs/implementation/ChatMoney_Agent中文管理界面使用指南.md) · [模型连接配置与启动](docs/implementation/ChatMoney_企业模型连接与DeepSeek配置指南.md) · [模型连接接口](https://localhost:8443/api/model-admin/v1/docs)
+
+**企业官网资料研究（只读）**：销售助手可在完成对练审核后，按已发布版本和已许可站点申请工具。服务器读取少量静态业务页，列出证据、匹配理由与草稿；成员审阅后才能保存自己的线索。不会建立正式客户会话或发送消息。[操作步骤](docs/implementation/ChatMoney_Agent中文管理界面使用指南.md) · [平台选择](docs/research/ChatMoney_ToB第三方平台接入优先级终审.md) · [工具与权限](docs/architecture/ChatMoney_第三方工具统一接入设计.md) · [本次验收](docs/implementation/ChatMoney_首个ToB真实工具开发与验收报告.md)。部署时保留普通 Worker、模拟对练 Worker 和单独的只读研究 Worker；本机单独启动研究后台的命令是 `python -m app.worker --queues research`（使用与 API 相同的本地运行环境）。现有核心接口版本继续独立维护。
 
 ## 在当前 Windows 工作站试用
 
@@ -93,14 +95,18 @@ $env:LLM_BACKEND = 'mock'
 .venv/Scripts/python.exe -m scripts.seed --tokens-file .runtime/dev-tokens.json
 ```
 
-在两个终端分别设置相同的 `DATABASE_URL` 和 `LLM_BACKEND`。API 和 Worker 运行期间用不到 `MIGRATION_DATABASE_URL`。本机现有环境可用 `. .runtime/env.ps1 dev` 加载。
+在各终端分别设置相同的 `DATABASE_URL` 和 `LLM_BACKEND`。API 和 Worker 运行期间用不到 `MIGRATION_DATABASE_URL`。本机现有环境可用 `. .runtime/env.ps1 dev` 加载。
 
 ```powershell
 # 终端一
 .venv/Scripts/python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
-# 终端二
+# 终端二：正式客户、资料解析等原有任务
 .venv/Scripts/python.exe -m app.worker
+# 终端三：只领取模拟客户对练；不接收真实渠道任务
+.venv/Scripts/python.exe -m app.worker --queues practice
 ```
+
+团队成员直接登录[HTTPS 工作台](https://agent.heiling.tech/console)，从助手详情进入“模拟客户对练”；无需在自己的电脑运行以上命令。使用 Compose 的环境有独立 `practice` 服务。若对练一直等待，先检查这个服务。参见[对练设计](docs/architecture/ChatMoney_模拟客户对练与验收设计.md)和[验收记录](docs/implementation/ChatMoney_模拟客户对练开发与验收报告.md)。
 
 Worker 空闲时轮询到期待办。多个 Worker 可以共享数据库；若要让客服和销售分别领取任务，可以分别使用 `--queues support` 和 `--queues sales,system`。`system` 处理资料解析。工作进程退出后，另一进程在租约到期后领取未完成工作。平台受理不明时，管理员可执行 `python -m scripts.reconcile toc <send_id>` 查询模拟平台的回执。有回执才记受理，查不到仍保留 `unknown`。
 

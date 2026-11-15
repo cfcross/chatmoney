@@ -1,6 +1,7 @@
 """SQLAlchemy Core models. All business foreign keys include the tenant."""
 
 from sqlalchemy import (
+    LargeBinary,
     MetaData,
     Table,
     Column,
@@ -156,8 +157,19 @@ model_connections = table(
     ref("created_by", "identities"),
     UniqueConstraint("tenant", "created_by", "name"),
 )
+agent_templates = table(
+    "agent_templates",
+    col("owner_id"),
+    ref("owner_id", "identities"),
+    col("revision", Integer, default="1"),
+    js("content"),
+    instant("created"),
+    instant("updated"),
+    Index("ix_agent_templates_owner", "tenant", "owner_id"),
+)
 agents = table(
     "agents",
+    col("template_origin", JSONB(none_as_null=True), null=True),
     col("deleted_at", DateTime(timezone=True), null=True),
     col("owner_id", null=True),
     ref("owner_id", "identities"),
@@ -221,6 +233,9 @@ docs = table(
     col("kb_id"),
     col("title"),
     col("original"),
+    col("size_bytes", BigInteger, null=True),
+    col("original_name", null=True),
+    col("source_sha256", null=True),
     col("source_note", null=True),
     col("revision", Integer, default="1"),
     col("status"),
@@ -240,6 +255,11 @@ chunks = table(
     col("ordinal", Integer),
     col("body"),
     ref("document_id", "documents"),
+    UniqueConstraint("tenant", "document_id", "ordinal"),
+)
+source_blocks = table(
+    "knowledge_source_blocks", col("document_id"), col("ordinal", Integer),
+    col("payload", LargeBinary), ref("document_id", "documents"),
     UniqueConstraint("tenant", "document_id", "ordinal"),
 )
 snapshots = table(
@@ -440,3 +460,9 @@ webhooks = table(
     ref("event_id", "events"),
     UniqueConstraint("tenant", "event_id", "subscriber"),
 )
+
+from app.practice.tables_v1 import define as define_practice
+practice, buyer_private, practice_turns, practice_calls, practice_reviews = define_practice(meta)
+
+from app.research.tables_v1 import define as define_research
+research_sources, research_grants, research_jobs, research_leads = define_research(meta)

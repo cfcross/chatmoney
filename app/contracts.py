@@ -50,9 +50,16 @@ class Config(Model):
     company_ref: Short
     product_ref: Short
     knowledge: list[KBRef] = Field(min_length=1, max_length=16)
+    # Declared interest only; real read access is granted per reviewed version and source.
+    research_tools: list[Literal["company.profile_read"]] = Field(default_factory=list, max_length=1)
     tool_allowlist: list[Short]
     policy_ref: Short
     handoff_on: list[Short]
+
+
+class TemplateSource(Model):
+    id: Short
+    version: Pos
 
 
 class AgentCreate(Model):
@@ -60,6 +67,7 @@ class AgentCreate(Model):
     workflow: Workflow
     product_id: Short
     config: dict = Field(default_factory=dict)
+    source_template: TemplateSource | None = None
 
 
 class Changes(Model):

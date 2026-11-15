@@ -1,14 +1,69 @@
+from pydantic import Field, ValidationError
 from sqlalchemy import select
-from pydantic import ValidationError
-from app import schema as s
-from app.contracts import Config
-from app.db import insert, reject, row, uid, update
 
-from app.policies import REGISTRY
+from app import agent_templates
+from app import schema as s
+from app.contracts import Config, KBRef
+from app.db import insert, reject, row, uid, update
 from app.model_connections import binding
+from app.policies import REGISTRY
 
 RULES = {ref: (workflow, set(signals)) for ref, (workflow, signals) in REGISTRY.items()}
 TOOL_NAMES = {"order.lookup", "channel.reply"}
+
+
+class OptionalKnowledgeConfig(Config):
+    knowledge: list[KBRef] = Field(max_length=16)
+
+
+def product_tools(c, tenant, product_ids):
+    grants = {p: set() for p in product_ids}
+    for product, capabilities in c.execute(
+        select(s.accounts.c.product_id, s.accounts.c.capabilities).where(
+            s.accounts.c.tenant == tenant,
+            s.accounts.c.product_id.in_(product_ids),
+            s.accounts.c.enabled,
+        )
+    ):
+        grants[product].update(TOOL_NAMES.intersection(capabilities))
+    return {product: sorted(names) for product, names in grants.items()}
+
+
+def draft_model(c, w, cfg, origin):
+    if (
+        origin
+        and cfg.get("model_provider") in (None, "deepseek")
+        and not cfg.get("model_connection_id")
+    ):
+        if cfg.get("model_name") or cfg.get("model_params"):
+            reject(422, "INVALID_MODEL_BINDING", "请先选择模型连接，再设置模型参数。")
+        return
+    binding(c, w.tenant, w.actor, cfg)
+
+
+def template_checks(c, w, product_id, cfg, origin):
+    req = origin["requirements"]
+    missing = []
+    if cfg.get("model_provider") not in ("mock", "deepseek") or (
+        cfg.get("model_provider") == "deepseek" and not cfg.get("model_connection_id")
+    ):
+        missing.append("选择自己的模型连接，或明确选择模拟演示")
+    if req["knowledge"] and not cfg.get("knowledge"):
+        missing.append("选择已批准并发布的产品资料")
+    if not cfg.get("allowed"):
+        missing.append("填写可回答的内容")
+    if not set(req["handoff"]).issubset(cfg.get("handoff_on") or []):
+        missing.append("勾选模板要求的转人工条件")
+    if not set(req["tools"]).issubset(
+        TOOL_NAMES.intersection(cfg.get("tool_allowlist") or [])
+    ):
+        missing.append("确认必需工具已接入并获得授权")
+    if set(cfg["tool_allowlist"]) - set(
+        product_tools(c, w.tenant, [product_id])[product_id]
+    ):
+        missing.append("只选择本产品已授权的工具")
+    if missing:
+        reject(422, "TEMPLATE_INCOMPLETE", "发布前还需：" + "；".join(missing))
 
 
 def allowed_draft(config):
@@ -97,10 +152,30 @@ def visible_config(c, w, a, cfg):
 
 def create(c, w, b):
     w.product(b.product_id)
-    row(c, s.products, w.tenant, b.product_id)
-    allowed_draft(b.config)
-    b.config.setdefault("model_provider", "mock")
-    binding(c, w.tenant, w.actor, b.config)
+    product = row(c, s.products, w.tenant, b.product_id)
+    origin = None
+    cfg = dict(b.config)
+    if b.source_template:
+        origin, defaults = agent_templates.apply(c, w, b.source_template, b.workflow)
+        cfg = (
+            dict(
+                company_ref=c.scalar(
+                    select(s.tenants.c.company_ref).where(s.tenants.c.id == w.tenant)
+                ),
+                product_ref=product.version_ref,
+                knowledge=[],
+                tool_allowlist=[],
+                policy_ref=next(
+                    ref for ref, (flow, _) in RULES.items() if flow == b.workflow
+                ),
+            )
+            | defaults
+            | cfg
+        )
+    else:
+        cfg.setdefault("model_provider", "mock")
+    allowed_draft(cfg)
+    draft_model(c, w, cfg, origin)
     id = insert(
         c,
         s.agents,
@@ -110,14 +185,22 @@ def create(c, w, b):
         owner_id=w.actor,
         workflow=b.workflow,
         product_id=b.product_id,
-        draft=b.config,
-        model_connection_id=b.config.get("model_connection_id"),
+        draft=cfg,
+        template_origin=origin,
+        model_connection_id=cfg.get("model_connection_id"),
     )
     return 201, {"agent_id": id, "status": "draft", "draft_revision": 1}
 
 
 def get(c, w, id, view, n):
     a = agent(c, w, id)
+    origin = a.template_origin
+    if (
+        origin
+        and origin["id"] not in agent_templates.BUILTINS
+        and a.owner_id != w.actor
+    ):
+        origin = None
     if view and n:
         reject(422, "VALIDATION_ERROR", "view 和 version 不能同时指定")
     if view == "draft":
@@ -126,6 +209,7 @@ def get(c, w, id, view, n):
             agent_id=id,
             status="disabled" if a.disabled else "draft",
             draft_revision=a.revision,
+            source_template=origin,
             **visible_config(c, w, a, a.draft),
             name=a.name,
             workflow=a.workflow,
@@ -136,6 +220,7 @@ def get(c, w, id, view, n):
         agent_id=id,
         status="disabled" if a.disabled else "published",
         version=v.number,
+        source_template=origin,
         name=v.name,
         workflow=a.workflow,
         product_id=a.product_id,
@@ -155,7 +240,7 @@ def revise(c, w, id, b):
     if model_changes and a.owner_id != w.actor:
         reject(403, "MODEL_OWNER_ONLY", "模型设置只能由助手创建者修改。")
     if a.owner_id == w.actor and ("model_provider" in cfg or model_changes):
-        binding(c, w.tenant, w.actor, cfg)
+        draft_model(c, w, cfg, a.template_origin)
     update(
         c,
         s.agents,
@@ -169,23 +254,22 @@ def revise(c, w, id, b):
     return 200, dict(agent_id=id, status="draft", draft_revision=a.revision + 1)
 
 
-def publish(c, w, id, b):
-    a = agent(c, w, id)
-    if a.disabled:
-        reject(409, "PROFILE_DISABLED", "角色已停用")
-    if a.revision != b.expected_revision:
-        reject(409, "REVISION_CONFLICT", "草稿已变更")
+def validate_profile(c, w, a, config):
+    profile_type = OptionalKnowledgeConfig if a.template_origin else Config
     try:
-        cfg = Config.model_validate(a.draft)
+        cfg = profile_type.model_validate(config)
     except ValidationError:
         reject(422, "INVALID_PROFILE", "发布配置缺少必要资料")
+    if a.template_origin:
+        template_checks(c, w, a.product_id, cfg.model_dump(), a.template_origin)
     company = c.execute(
         select(s.tenants.c.company_ref).where(s.tenants.c.id == w.tenant)
     ).scalar_one()
     product = row(c, s.products, w.tenant, a.product_id)
     reg = RULES.get(cfg.policy_ref)
     if (
-        cfg.company_ref != company
+        (cfg.research_tools and a.workflow != "sales")
+        or cfg.company_ref != company
         or cfg.product_ref != product.version_ref
         or not reg
         or reg[0] != a.workflow
@@ -220,8 +304,17 @@ def publish(c, w, id, b):
         reject(
             403, "MODEL_OWNER_ONLY", "请由助手创建者绑定并发布自己的 DeepSeek 连接。"
         )
-    if "model_provider" in a.draft:
-        binding(c, w.tenant, w.actor, a.draft)
+    if "model_provider" in config:
+        binding(c, w.tenant, w.actor, config)
+
+
+def publish(c, w, id, b):
+    a = agent(c, w, id)
+    if a.disabled:
+        reject(409, "PROFILE_DISABLED", "角色已停用")
+    if a.revision != b.expected_revision:
+        reject(409, "REVISION_CONFLICT", "草稿已变更")
+    validate_profile(c, w, a, a.draft)
     n = a.published + 1
     insert(
         c,

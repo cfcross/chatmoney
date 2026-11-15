@@ -57,7 +57,7 @@ const errors = {
   CONVERSATION_BUSY: "这段渠道对话已有负责会话。请从客户列表打开原有对话。",
   RATE_LIMITED: "操作过于频繁，请稍后重试。",
   UNSUPPORTED_MEDIA: "请选择有效的 UTF-8 文本（.txt 或 .md）。",
-  FILE_TOO_LARGE: "文件需小于或等于 1 MiB。",
+  FILE_TOO_LARGE: "文件超过 1 GB，请选择更小的文件。",
   UNAVAILABLE: "服务暂时不可用。请核对已有记录，稍后重试。",
 };
 export function friendly(err) {
@@ -73,7 +73,7 @@ export function notify(msg) {
   el("#toast").textContent = msg;
   timer = setTimeout(() => (el("#toast").textContent = ""), 6500);
 }
-export async function request(path, { method = "GET", body, key, query } = {}) {
+export async function request(path, { method = "GET", body, key, query, uploadSignal } = {}) {
   const read = method === "GET",
     url = new URL(
       path.startsWith("/console/") || path.startsWith("/api/model-admin/")
@@ -116,7 +116,7 @@ export async function request(path, { method = "GET", body, key, query } = {}) {
       headers,
       cache: "no-store",
       credentials: "same-origin",
-      signal: controller.signal,
+      signal: uploadSignal ? AbortSignal.any([controller.signal, uploadSignal]) : controller.signal,
       body: read ? undefined : form ? body : JSON.stringify(body || {}),
     });
   } catch (e) {
@@ -221,6 +221,7 @@ export function formDialog({
   fields = "",
   submit = "确定",
   danger = false,
+  cancellable = false,
   work,
 }) {
   return new Promise((resolve) => {
@@ -237,8 +238,9 @@ export function formDialog({
         esc(submit) +
         "</button></div></form>",
     );
-    let busy = false;
+    let busy = false, transfer;
     const close = () => {
+      transfer?.abort();
       d.removeEventListener("close", close);
       form.querySelectorAll("input[type=password]").forEach((input) => {
         input.value = "";
@@ -247,7 +249,7 @@ export function formDialog({
       resolve(false);
     };
     const cancel = (e) => {
-      if (busy) e.preventDefault();
+      if (busy && !cancellable) e.preventDefault();
     };
     d.addEventListener("cancel", cancel);
     d.addEventListener("close", close);
@@ -260,11 +262,12 @@ export function formDialog({
         button = el("[type=submit]", d);
       busy = true;
       button.disabled = true;
-      el("[data-act=cancel]", d).disabled = true;
-      button.textContent = "正在提交…";
+      el("[data-act=cancel]", d).disabled = !cancellable;
+      button.textContent = cancellable ? "正在上传，等待服务器确认…" : "正在提交…";
+      if (cancellable) transfer = new AbortController();
       el(".error-text", d).textContent = "";
       try {
-        await work(data);
+        await work(data, transfer?.signal);
         resolve(true);
         d.close();
       } catch (err) {

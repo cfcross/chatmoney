@@ -39,6 +39,12 @@ REGISTRY = {
 }
 
 
+# Public registry describes capability, while each execution lane has its own scope and adapter.
+from app.research.network import META as WEBSITE_READ
+TOOL_DIRECTORY = {**{k: {"tool_name": k, "provider": "mock_channel", "lane":"conversation",
+                           "read_or_write": "read" if k=="order.lookup" else "intent"} for k in REGISTRY},
+                  WEBSITE_READ["tool_name"]: {**WEBSITE_READ, "lane":"research"}}
+
 def server_for(order):
     # A fresh trusted capability bound to the authorized row. Model arguments cannot change its scope.
     server = FastMCP("ChatMoney local mock")
@@ -81,6 +87,14 @@ async def exchange(tool, args, order):
 
 
 class Gateway:
+    # This registered capability is used before there is a customer conversation.
+    research_descriptor=TOOL_DIRECTORY[WEBSITE_READ["tool_name"]]
+
+    def research(self, execution):
+        from app.research.tool import exchange as read_approved
+        ticket=execution.permit()
+        return asyncio.run(read_approved(ticket,execution.guard,execution.audit))
+
     def descriptions(self, c, t, cfg, cv):
         account = row(c, s.accounts, t, cv.account_id)
         if not account.enabled:
@@ -99,6 +113,13 @@ class Gateway:
         ]
 
     def execute(self, ex, tc, key):
+        if getattr(ex, "practice", False):
+            return dict(
+                status="denied",
+                error="PRACTICE_EXTERNAL_BLOCKED",
+                data=None,
+                execution_id=None,
+            )
         t = ex.tenant
         with ex.tx() as (c, r):
             cached = (

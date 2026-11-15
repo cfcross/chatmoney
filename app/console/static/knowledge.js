@@ -262,6 +262,7 @@ async function book(n, id) {
       (live.has(d.document_id) ? "checked" : "") +
       "><span>" +
       esc(d.title) +
+      (d.partial_index ? "（仅前 2 MB 可检索）" : "") +
       "<small>" +
       (live.has(d.document_id)
         ? "已批准，默认保留。"
@@ -270,7 +271,8 @@ async function book(n, id) {
     );
   }
   const rows = manifest.documents.map((d) => [
-    esc(d.title),
+    esc(d.title) + (d.size_bytes == null ? "" : "<small>" + d.size_bytes.toLocaleString("zh-CN") +
+      " 字节" + (d.partial_index ? " · 检索前 2 MB" : "") + "</small>"),
     badge("doc", docState(d)),
     d.status === "processing"
       ? "尚未审核"
@@ -364,7 +366,7 @@ async function book(n, id) {
                 ? "这里还没有文件"
                 : "当前没有可查看的已发布文件",
               state.ws.manage_knowledge
-                ? "支持 .txt 或 .md 格式的 UTF-8 文本，每个文件最多 1 MiB。"
+                ? "支持 UTF-8 的 .txt、.md 文件，单文件最大 1 GB。"
                 : "管理员批准并发布可用文件后，即可查看。",
             )) +
         (previous.length
@@ -405,6 +407,7 @@ async function book(n, id) {
     const original = await request(
       "/console/data/documents/" + encodeURIComponent(doc),
     );
+    if (original.size_bytes > 1048576) return uploadForm({ ...original, id: doc });
     await formDialog({
       title: "编辑文件",
       description:
@@ -462,9 +465,9 @@ async function book(n, id) {
     );
   });
   on(main(), "refresh", refresh);
-  on(main(), "preview", async (b) => {
+  async function previewPage(id, offset = 0, previous = []) {
     const d = await request(
-      "/console/data/documents/" + encodeURIComponent(b.dataset.id),
+      "/console/data/documents/" + encodeURIComponent(id), {query: {offset}},
     );
     showInfo(
       d.title,
@@ -474,18 +477,24 @@ async function book(n, id) {
         esc(d.source || "上传时未注明") +
         '</p><pre class="doc-preview">' +
         esc(d.text) +
-        "</pre>",
+        "</pre>" + (previous.length ? btn("上一段", "prev-text", "返回上一段原文") : "") +
+        (d.next_offset != null ? btn("下一段", "next-text", "继续阅读原文") : ""),
     );
-  });
-  on(main(), "upload", () =>
-    formDialog({
-      title: "上传资料",
+    const modal = el("#dialog");
+    on(modal, "next-text", () => previewPage(id, d.next_offset, [...previous, offset]));
+    on(modal, "prev-text", () => previewPage(id, previous.at(-1), previous.slice(0, -1)));
+  }
+  on(main(), "preview", b => previewPage(b.dataset.id));
+  function uploadForm(existing) {
+    return formDialog({
+      title: existing ? "上传完整替换文件" : "上传资料",
+      cancellable: true,
       fields:
         field(
           "文件名称",
           control(
             "title",
-            "",
+            existing?.title || "",
             "例如：产品服务范围",
             'required maxlength="200"',
           ),
@@ -494,24 +503,28 @@ async function book(n, id) {
         field(
           "选择本地文件",
           '<input type="file" name="file" accept=".txt,.md" required>',
-          "支持 UTF-8 文本和 Markdown，每个文件最多 1 MiB。",
+          "支持 UTF-8 的 .txt、.md，单文件最大 1 GB（十亿字节）。保存全部原文；超过 2 MB 时仅前 2 MB 参与助手检索。解析后须审核发布。",
         ) +
         field(
           "资料来源（选填）",
           control(
             "source_note",
-            "",
+            existing?.source || "",
             "例如：吴姐确认的产品说明",
             'maxlength="1000"',
           ),
           "便于日后核对出处。",
         ),
       submit: "上传并解析",
-      work: async (f) => {
+      work: async (f, signal) => {
         const file = f.get("file");
-        if (!/\.(txt|md)$/i.test(file.name) || file.size > 1048576)
-          throw new Error("请选择不超过 1 MiB 的 .txt 或 .md 文件。");
-        const r = await post(path(id) + "/documents", f);
+        if (!/\.(txt|md)$/i.test(file.name)) throw new Error("请选择 .txt 或 .md 文件。");
+        if (file.size > 1_000_000_000) throw new Error("文件超过 1 GB，请选择更小的文件。");
+        if (existing) {
+          f.set("replace_id", existing.id);
+          f.set("expected_revision", existing.revision);
+        }
+        const r = await request(path(id) + "/documents", {method:"POST", body:f, uploadSignal:signal});
         notify("文件已提交解析");
         const out = await awaitRun(r.run_id, 4000);
         notify(
@@ -525,8 +538,9 @@ async function book(n, id) {
         );
         refresh();
       },
-    }),
-  );
+    });
+  }
+  on(main(), "upload", () => uploadForm(null));
   on(main(), "approve", () =>
     formDialog({
       title: "批准并发布资料",

@@ -54,27 +54,28 @@ import {
   bindSelector,
   connectionsPage,
 } from "./connections.js";
-const triggers = {
-  ask_human: ["客户要求真人", "先冻结自动回复，再生成可认领的人工待办。"],
-  identity_question: ["客户询问身份", "停止自动解释身份，保留原话供真人接手。"],
-  formal_quote: [
-    "客户要求正式报价",
-    "把正式报价交给负责人，助手停止自动发送。",
-  ],
-  contract: ["涉及合同或付款", "涉及商务承诺时冻结发送，由负责人处理。"],
-  refund: ["客户提出退款", "交给客服坐席核实订单与售后政策。"],
-  complaint: ["客户提出投诉", "保留问题和上下文，请人工处理。"],
-};
+import {
+  roleFields,
+  scopeFields,
+  checked,
+  handoffFields,
+  splitGoal,
+  joinedGoal,
+  list,
+  triggers,
+} from "./role-fields.js";
+import {
+  libraryPage,
+  chooseTemplate,
+  templateSummary,
+  exportLink,
+} from "./templates.js";
+import { practicePage, candidatePage } from "./practice.js";
+import { researchPage, researchPolicy } from "./research.js";
 const toolHelp = {
   "order.lookup": "只查询已经核实属于当前客户的模拟订单。",
   "channel.reply": "允许助手申请回复，发送前仍会检查渠道权限和人工归属。",
 };
-const lines = (v) => (Array.isArray(v) ? v.join("\n") : "");
-const list = (v) =>
-  v
-    .split(/\n/)
-    .map((x) => x.trim())
-    .filter(Boolean);
 const pth = (id) => "/agents/" + encodeURIComponent(id);
 const wrap = (name, hint, text) =>
   '<div class="field"><span>' +
@@ -84,18 +85,6 @@ const wrap = (name, hint, text) =>
   "<small>" +
   esc(hint) +
   "</small></div>";
-const checked = (name, id, label, help, yes) =>
-  '<label class="check"><input type="checkbox" name="' +
-  name +
-  '" value="' +
-  esc(id) +
-  '" ' +
-  (yes ? "checked" : "") +
-  "><span>" +
-  esc(label) +
-  "<small>" +
-  esc(help) +
-  "</small></span></label>";
 export async function agents(n, parts) {
   if (
     parts[1] === "connections" ||
@@ -106,7 +95,13 @@ export async function agents(n, parts) {
     main().innerHTML = permission();
     return;
   }
-  if (parts[1] === "new" || parts[1] === "edit") return editor(n, parts[2]);
+  if (parts[1] === "research-policy") return researchPolicy(n);
+  if (parts[1] === "research") return researchPage(n,parts.slice(2));
+  if (parts[1] === "practice") return practicePage(n, parts.slice(2));
+  if (parts[1] === "candidates") return candidatePage(n);
+  if (parts[1] === "templates") return libraryPage(n, parts.slice(2));
+  if (parts[1] === "new") return editor(n, null, parts[2], parts[3]);
+  if (parts[1] === "edit") return editor(n, parts[2]);
   if (parts[1] === "view") return detail(n, parts[2]);
   let page = 1,
     q = "";
@@ -131,6 +126,8 @@ export async function agents(n, parts) {
         has("own_agents")
           ? "这里显示你创建的助手。点击“创建助手”设置名称、角色和产品资料。"
           : "按产品配置角色。已发布的版本可以用于新任务。",
+        (has("publish") ? link("研究来源与授权","agents/research-policy","btn","登记来源许可、审批助手的只读研究权限") : "") +
+        (has("publish") ? link("启用审核", "agents/candidates", "btn", "审阅已提交的配置，不授予平台权限") : "") +
         (state.ws.manage_models
           ? link(
               "我的模型连接",
@@ -140,7 +137,19 @@ export async function agents(n, parts) {
             )
           : "") +
           (has("config", "own_agents")
-            ? link("创建助手", "agents/new", "primary", "新建产品专属助手")
+            ? link(
+                "从模板创建",
+                "agents/templates/system",
+                "primary",
+                "选择模板，预填角色和工作目标",
+              ) +
+              link("创建助手", "agents/new", "btn", "从空白自定义创建助手") +
+              link(
+                "我的模板",
+                "agents/templates/personal",
+                "btn",
+                "管理自己保存的配置",
+              )
             : ""),
       ) +
       panel(
@@ -184,24 +193,46 @@ export async function agents(n, parts) {
   let ticket = 0;
   await draw();
 }
-function splitGoal(goal = "") {
-  const m = goal.match(/^主要工作：([^\n]*)\n工作目标：([\s\S]*)$/);
-  return m ? { duty: m[1], goal: m[2] } : { duty: "", goal };
-}
-function checks(a, c) {
+function checks(a, c, source = null) {
+  const req = source?.requirements;
   return [
     [!!a.name.trim() && !!a.product_id, "已填写助手名称和所属产品"],
     [
       !!(c.persona?.trim() && c.tone?.trim() && c.goal?.trim()),
       "已填写角色、沟通风格和目标",
     ],
-    [!!c.knowledge?.length, "已选择获批的资料版本"],
+    [
+      req?.knowledge === false || !!c.knowledge?.length,
+      req?.knowledge === false
+        ? "此场景允许不引用产品资料"
+        : "已选择获批的资料版本",
+    ],
     [!!c.allowed?.length, "已说明可以回答的内容"],
     [!!c.policy_ref, "已关联当前业务的接管规则"],
     [
-      c.model_provider !== "deepseek" || !!c.model_connection_id,
-      "已选择模型连接",
+      (!source || ["mock", "deepseek"].includes(c.model_provider)) &&
+        (c.model_provider !== "deepseek" || !!c.model_connection_id),
+      "已选择个人模型连接或模拟演示",
     ],
+    ...(req?.handoff.length
+      ? [
+          [
+            req.handoff.every((k) => c.handoff_on?.includes(k)),
+            "已勾选必需的转人工条件",
+          ],
+        ]
+      : []),
+    ...(req?.tools.length
+      ? [
+          [
+            req.tools.every(
+              (k) =>
+                state.ws.tools.includes(k) && c.tool_allowlist?.includes(k),
+            ),
+            "已选择已接入的必需工具",
+          ],
+        ]
+      : []),
   ];
 }
 const checklist = (tests) =>
@@ -250,6 +281,11 @@ async function detail(n, id) {
             "编辑工作草稿，不影响当前任务",
           )
         : "") +
+        (draft?.model_editable && view.workflow === "sales" ? link("企业研究","agents/research/"+id,"btn","申请只读工具、分析官网并审核联系草稿") : "") +
+        (draft?.model_editable ? link("模拟客户对练", "agents/practice/" + id, "primary", "测试草稿或已发布版本，并查看历史") : "") +
+        (draft?.model_editable
+          ? exportLink(id, view.version, draft.draft_revision)
+          : "") +
         (draft &&
         has("publish", "own_agents") &&
         (draft.model_editable || draft.config.model_provider !== "deepseek") &&
@@ -276,7 +312,19 @@ async function detail(n, id) {
         展示版本: view.version
           ? "已发布 · 第 " + view.version + " 版"
           : "工作草稿",
-        使用的模型: modelSummary(c),
+        使用的模型:
+          view.source_template && !c.model_provider
+            ? "待选择"
+            : modelSummary(c),
+        ...(view.source_template
+          ? {
+              创建来源:
+                view.source_template.name +
+                " · 第 " +
+                view.source_template.version +
+                " 版",
+            }
+          : {}),
         ...(view.model_needs_rebind
           ? {
               模型设置:
@@ -306,6 +354,7 @@ async function detail(n, id) {
                 " 版",
             )
             .join("、") || "尚未选择",
+        企业研究: c.research_tools?.length ? "已选择 · 实际权限按版本和来源审批" : "未选择",
         可用工具:
           (c.tool_allowlist || [])
             .map((k) => toolNames[k] || "其他工具")
@@ -364,7 +413,7 @@ async function detail(n, id) {
   );
 }
 async function publishCheck(id, draft, done) {
-  const tests = checks(draft, draft.config);
+  const tests = checks(draft, draft.config, draft.source_template);
   const books = await choices("books", { product: draft.product_id });
   tests.push([
     (draft.config.knowledge || []).every((ref) =>
@@ -376,7 +425,13 @@ async function publishCheck(id, draft, done) {
     "已核对绑定资料仍可使用",
   ]);
   if (tests.some((x) => !x[0])) {
-    notify("配置还不完整，请编辑后再发布。");
+    await formDialog({
+      title: "发布前还需完善",
+      fields: checklist(tests),
+      submit: "去编辑",
+      work: async () => go("agents/edit/" + id),
+    });
+
     return;
   }
   await formDialog({
@@ -393,7 +448,7 @@ async function publishCheck(id, draft, done) {
     },
   });
 }
-async function editor(n, id) {
+async function editor(n, id, templateId, templateVersion) {
   if (!has("config", "own_agents")) {
     main().innerHTML = permission("创建和编辑助手需要配置管理权限。");
     return;
@@ -407,6 +462,20 @@ async function editor(n, id) {
         product_id: ws.products[0]?.id || "",
         config: { model_provider: "mock" },
       };
+  let source = draft.source_template || null;
+  if (templateId) {
+    source = await request(
+      "/console/manage/templates/" + encodeURIComponent(templateId),
+    );
+    if (templateVersion && Number(templateVersion) !== source.version)
+      throw new Error("模板已更新，请返回模板库重新选择。");
+    draft = {
+      name: "",
+      workflow: source.workflow,
+      product_id: "",
+      config: { ...source.config },
+    };
+  }
   if (draft.status === "disabled") {
     go("agents/view/" + id);
     return;
@@ -451,9 +520,9 @@ async function editor(n, id) {
       if (!locked()) {
         const wf = f.get("workflow"),
           pid = f.get("product");
-        if (wf !== a.workflow) c.handoff_on = [];
+        if (wf && wf !== a.workflow) c.handoff_on = [];
         if (pid !== a.product_id) c.knowledge = [];
-        a.workflow = wf;
+        a.workflow = wf || a.workflow;
         a.product_id = pid;
       }
     }
@@ -467,6 +536,7 @@ async function editor(n, id) {
         snapshot: Number(x.dataset.version),
       }));
       c.tool_allowlist = f.getAll("tools");
+      c.research_tools = f.has("research_wanted") && a.workflow==="sales" ? ["company.profile_read"] : [];
       c.allowed = list(String(f.get("allowed") || ""));
       c.forbidden = list(String(f.get("forbidden") || ""));
     }
@@ -498,11 +568,12 @@ async function editor(n, id) {
       policy_ref: ws.rules[a.workflow]?.ref,
       persona: c.persona,
       tone: c.tone,
-      goal: c.duty ? "主要工作：" + c.duty + "\n工作目标：" + c.goal : c.goal,
+      goal: joinedGoal(c),
       allowed: c.allowed,
       forbidden: c.forbidden,
       knowledge: c.knowledge,
       tool_allowlist: c.tool_allowlist,
+      ...(a.workflow==="sales" && c.research_tools?.length ? {research_tools:c.research_tools} : {}),
       handoff_on: c.handoff_on,
     };
   }
@@ -546,6 +617,9 @@ async function editor(n, id) {
           '<select name="product" ' +
             (locked() ? "disabled" : "") +
             ">" +
+            (source && !locked()
+              ? opt("", "请选择本次产品", a.product_id)
+              : "") +
             ws.products.map((x) => opt(x.id, x.name, a.product_id)).join("") +
             "</select>",
           "助手只读取这款产品批准的资料。",
@@ -554,7 +628,7 @@ async function editor(n, id) {
         field(
           "业务类型",
           '<select name="workflow" ' +
-            (locked() ? "disabled" : "") +
+            (locked() || source ? "disabled" : "") +
             ">" +
             opt("sales", "企业销售", a.workflow) +
             opt("support", "店铺客服", a.workflow) +
@@ -563,36 +637,7 @@ async function editor(n, id) {
         );
     if (step === 1)
       body =
-        field(
-          "助手扮演的角色",
-          control(
-            "persona",
-            c.persona,
-            "例如：排班产品的商务顾问",
-            'maxlength="200"',
-          ),
-          "说明它以什么身份帮助客户。",
-        ) +
-        field(
-          "主要负责的工作",
-          control("duty", c.duty, "例如：澄清企业排班需求", 'maxlength="200"'),
-          "与下方目标一同保存在工作说明中。",
-        ) +
-        field(
-          "沟通风格",
-          control("tone", c.tone, "例如：专业、简洁、亲切", 'maxlength="200"'),
-          "决定助手和客户说话的方式。",
-        ) +
-        field(
-          "希望达到的目标",
-          area(
-            "goal",
-            c.goal,
-            "例如：确认团队规模并安排演示",
-            'maxlength="11000"',
-          ),
-          "描述一次对话希望得到的具体结果。",
-        ) +
+        roleFields(c) +
         (draft.model_editable === false
           ? note("模型由助手创建者管理。你可以维护其他角色资料。")
           : (draft.model_needs_rebind
@@ -600,7 +645,7 @@ async function editor(n, id) {
                   "此助手原先引用了其他账号的连接。请选择你自己的连接，或改用模拟模型。",
                   "warn",
                 )
-              : "") + selector(c, connections));
+              : "") + selector(c, connections, Boolean(source)));
     if (step === 2)
       body =
         wrap(
@@ -636,7 +681,7 @@ async function editor(n, id) {
         wrap(
           "可使用的工具",
           "按工作需要选择。最终执行仍受账号、客户身份和发送权限约束。",
-          ws.tools
+          (source ? ws.tools_by_product[a.product_id] || [] : ws.tools)
             .map((k) =>
               checked(
                 "tools",
@@ -646,38 +691,19 @@ async function editor(n, id) {
                 c.tool_allowlist.includes(k),
               ),
             )
-            .join(""),
+            .join("") || note("当前产品尚无已授权的工具，可以只生成草稿。"),
         ) +
-        field(
-          "可以回答的内容",
-          area("allowed", lines(c.allowed), "例如：已批准的产品功能和服务范围"),
-          "每行一项，帮助助手把回答限制在产品范围内。",
-        ) +
-        field(
-          "禁止承诺的内容",
-          area("forbidden", lines(c.forbidden), "例如：保证交期、未批准的折扣"),
-          "每行一项。留空表示未额外设置禁止用语。",
-        );
+        (a.workflow==="sales" ? wrap("企业官网资料研究 · 只读","勾选仅保存申请意愿。对练使用虚构资料；发布后还须按网站申请管理员授权。",checked("research_wanted","yes","企业官网资料研究","只读取许可页面，不会向企业发消息。",c.research_tools?.includes("company.profile_read"))) : "") +
+        scopeFields(c);
     if (step === 3)
       body =
         wrap(
           "哪些情况转给人工",
           "触发后，系统冻结此对话的自动发送，并建立人工待办。",
-          (ws.rules[a.workflow]?.triggers || [])
-            .sort()
-            .map((k) =>
-              checked(
-                "handoff",
-                k,
-                triggers[k]?.[0] || "其他已批准条件",
-                triggers[k]?.[1] || "",
-                c.handoff_on.includes(k),
-              ),
-            )
-            .join(""),
+          handoffFields(c.handoff_on, ws.rules[a.workflow]?.triggers || []),
         ) +
         '<h3 class="spaced">发布前检查</h3>' +
-        checklist(checks(a, config())) +
+        checklist(checks(a, config(), source)) +
         details(
           "高级配置",
           techRows({
@@ -691,7 +717,15 @@ async function editor(n, id) {
       heading(
         id ? "编辑助手" : "创建助手",
         "按顺序配置角色，也可以随时保存草稿。",
+        existing
+          ? ""
+          : btn(
+              source ? "更换模板" : "选择模板",
+              "choose-template",
+              "查看模板，确认后替换通用配置",
+            ),
       ) +
+      (source ? templateSummary(source) : "") +
       '<div class="form-page">' +
       panel(
         titles[step],
@@ -713,6 +747,7 @@ async function editor(n, id) {
           '<div class="form-actions">' +
           (step ? btn("上一步", "previous", "返回上一组设置") : "") +
           btn("保存草稿", "save", "保存当前配置，稍后继续编辑") +
+          (draft.model_editable !== false ? btn("保存草稿并对练","practice-save","保存后选择模拟客户，不发布助手") : "") +
           (step < 3
             ? btn("下一步", "next", "继续填写" + titles[step + 1], "primary")
             : has("publish", "own_agents") &&
@@ -724,6 +759,22 @@ async function editor(n, id) {
           "</div></form>",
       ) +
       "</div>";
+    on(main(), "choose-template", async () => {
+      sync();
+      const next = await chooseTemplate();
+      if (!next || !active(n)) return;
+      source = next;
+      a.workflow = next.workflow;
+      c = {
+        ...next.config,
+        ...splitGoal(next.config.goal),
+        knowledge: [],
+        tool_allowlist: [],
+      };
+      step = 0;
+      dirty = true;
+      draw();
+    });
     if (step === 1)
       bindSelector(
         el("#editor"),
@@ -753,6 +804,7 @@ async function editor(n, id) {
       step++;
       draw();
     });
+    on(main(), "practice-save", async () => { sync(); await save(); go("agents/practice/" + existing); });
     on(main(), "save", async () => {
       sync();
       await save();
@@ -762,13 +814,13 @@ async function editor(n, id) {
     on(main(), "publish", async () => {
       sync();
       const cfg = config();
-      if (!c.goal || checks(a, cfg).some((i) => !i[0]))
+      if (!c.goal || checks(a, cfg, source).some((i) => !i[0]))
         throw new Error("请按发布前检查补齐配置。");
       await formDialog({
         title: "发布助手",
         description:
           "先保存工作草稿，再由服务器校验并发布。新版本可用于新任务。",
-        fields: checklist(checks(a, cfg)),
+        fields: checklist(checks(a, cfg, source)),
         submit: "确认发布",
         work: async () => {
           await save();
@@ -793,7 +845,13 @@ async function editor(n, id) {
         changes: { name: a.name, config: cfg },
       });
     } else {
-      r = await post("/agents", { ...a, config: cfg });
+      r = await post("/agents", {
+        ...a,
+        config: cfg,
+        ...(source
+          ? { source_template: { id: source.id, version: source.version } }
+          : {}),
+      });
       existing = r.agent_id;
     }
     rev = r.draft_revision;

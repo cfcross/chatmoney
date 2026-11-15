@@ -1,9 +1,12 @@
-import hashlib
+import functools
 from pathlib import Path
-from typing import Annotated
-from fastapi import APIRouter, File, Form, Query, UploadFile
+import anyio
+from fastapi import APIRouter, Query, Request
+from sqlalchemy.exc import DBAPIError
+from starlette.concurrency import run_in_threadpool
 from app import knowledge as k, contracts as x
-from app.db import reject
+from app import knowledge_upload as up
+from app.db import reject, transaction
 from app.http import Read, Write
 
 router = APIRouter(prefix="/knowledge-bases", tags=["知识资料"])
@@ -19,32 +22,45 @@ def create_book(body: x.KBCreate, call: Write):
     )
 
 
-@router.post("/{id}/documents", status_code=202)
-def upload_document(
-    id: str,
-    call: Write,
-    file: Annotated[UploadFile, File()],
-    title: Annotated[str, Form(min_length=1, max_length=200)],
-    source_note: Annotated[str | None, Form(max_length=1000)] = None,
-):
+@router.post("/{id}/documents", status_code=202, openapi_extra=up.UPLOAD_SCHEMA)
+async def upload_document(id: str, request: Request, call: Write):
     call.identity.require("manage_knowledge")
-    raw = file.file.read(1024 * 1024 + 1)
-    if len(raw) > 1024 * 1024:
-        reject(413, "FILE_TOO_LARGE", "文件超过 1 MiB")
+    def check_book():
+        with transaction(call.identity.tenant) as c:
+            k.book(c, call.identity, id)
+    await run_in_threadpool(check_book)
+    slot = up.upload_slot()
+    await run_in_threadpool(slot.__enter__)
     try:
-        body = raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        reject(415, "UNSUPPORTED_MEDIA", "需要 UTF-8 文本")
-    ext = Path(file.filename or "").suffix.lower()
-    if ext not in {".txt", ".md"}:
-        reject(415, "UNSUPPORTED_MEDIA", "仅接受有效 TXT / Markdown")
-    k.validate_text(body)
-    return call.execute(
-        ("manage_knowledge",),
-        lambda c, w: k.upload(c, w, id, title, source_note, body),
-        [title, source_note, ext, hashlib.sha256(raw).hexdigest()],
-        authorize=lambda c, w: k.book(c, w, id),
-    )
+        form, size, digest = await up.receive_form(request)
+        try:
+            title = form.get("title", "")
+            source = form.get("source_note") or None
+            replace_id = form.get("replace_id") or None
+            revision = form.get("expected_revision")
+            if not title.strip() or len(title)>200 or (source and len(source)>1000):
+                reject(422, "VALIDATION_ERROR", "请检查文件名称和资料来源。")
+            if bool(replace_id) != bool(revision) or (revision and (not revision.isdecimal() or len(revision)>10)):
+                reject(422, "VALIDATION_ERROR", "请核对需要替换的文件和版本。")
+            file = form["file"]
+            fingerprint = [title, source, Path(file.filename).suffix.lower(), digest]
+            if replace_id:
+                fingerprint += [replace_id, revision]
+            return await run_in_threadpool(functools.partial(
+                call.execute, ("manage_knowledge",),
+                lambda c,w: k.save_file(c,w,id,title,source,file,size,digest,replace_id,int(revision or 0)),
+                fingerprint, authorize=lambda c,w: k.book(c,w,id),
+                fence=("knowledge-upload",call.identity.tenant)))
+        finally:
+            with anyio.CancelScope(shield=True):
+                await form.close()
+    except DBAPIError as exc:
+        if getattr(exc.orig, "sqlstate", None) in {"53100","53400"}:
+            reject(507, "STORAGE_FULL", up.SPACE_ERROR)
+        raise
+    finally:
+        with anyio.CancelScope(shield=True):
+            await run_in_threadpool(slot.__exit__, None, None, None)
 
 
 @router.get("/{id}")

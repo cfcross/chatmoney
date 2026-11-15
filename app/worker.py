@@ -228,6 +228,19 @@ class Worker:
         lanes = [(t, q) for q in self.queues for t in tenants]
         for i in range(len(lanes)):
             t, q = lanes[(self.offset + i) % len(lanes)]
+            if q == "research":
+                from app.research.runner import tick as research_tick
+                if research_tick(t,self.model):
+                    self.offset=(self.offset+i+1)%len(lanes)
+                    return True
+                continue
+            if q == "practice":
+                from app.practice.runner import tick as practice_tick
+
+                if practice_tick(t, self.model):
+                    self.offset = (self.offset + i + 1) % len(lanes)
+                    return True
+                continue
             job = claim(t, [q])
             if job:
                 self.offset = (self.offset + i + 1) % len(lanes)
@@ -249,7 +262,8 @@ def main():
     while True:
         try:
             active = worker.tick()
-            deliver_events()
+            if any(q not in ("practice","research") for q in worker.queues):
+                deliver_events()
         except KeyboardInterrupt:
             return
         except Exception as exc:

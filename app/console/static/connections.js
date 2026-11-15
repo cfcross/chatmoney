@@ -291,12 +291,16 @@ export async function connectionsPage(n) {
     active(n),
   );
 }
-export function selector(c, items) {
+export function selector(c, items, explicit = false) {
   const p = c.model_provider || "legacy",
     rec = items.find((x) => x.id === c.model_connection_id);
   const providers =
     (!c.model_provider
-      ? opt("legacy", "旧版配置（真实模型需重新绑定）", p)
+      ? opt(
+          explicit ? "" : "legacy",
+          explicit ? "请选择模型" : "旧版配置（真实模型需重新绑定）",
+          explicit ? "" : p,
+        )
       : "") +
     opt("mock", "模拟模型", p) +
     opt("deepseek", "DeepSeek", p);

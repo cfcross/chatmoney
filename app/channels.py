@@ -164,6 +164,12 @@ class Sender:
         self.after_intent, self.after_accept = after_intent, after_accept
 
     def __call__(self, ex, text, sources):
+        if getattr(ex, "practice", False):
+            return dict(
+                action="suppressed",
+                delivery="not_sent",
+                reason="PRACTICE_EXTERNAL_BLOCKED",
+            )
         t = ex.tenant
         with ex.tx() as (c, r):
             se, task, a, cv = entities(c, t, r)
@@ -188,6 +194,12 @@ class Sender:
         return self.dispatch(ex)
 
     def dispatch(self, ex):
+        if getattr(ex, "practice", False):
+            return dict(
+                action="suppressed",
+                delivery="not_sent",
+                reason="PRACTICE_EXTERNAL_BLOCKED",
+            )
         t = ex.tenant
         with ex.tx() as (c, r):
             v = current(c, t, r.id)

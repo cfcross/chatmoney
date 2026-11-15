@@ -6,6 +6,8 @@ from starlette.staticfiles import StaticFiles
 from app.console.read import router as reads
 from app.console.auth import router as auth
 from app.console.manage import router as manage
+from app.console.templates import router as templates
+from app.console.practice import router as practice
 
 ASSETS = Path(__file__).parent / "static"
 
@@ -31,6 +33,10 @@ def mount_console(app):
     app.include_router(reads)
     app.include_router(auth)
     app.include_router(manage)
+    app.include_router(templates)
+    app.include_router(practice)
+    from app.console.research import router as research
+    app.include_router(research)
 
     @app.middleware("http")
     async def private_console(request, call_next):

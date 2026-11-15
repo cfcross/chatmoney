@@ -65,7 +65,7 @@ def main():
             db.execute(sql.SQL("GRANT {} ON {} TO {}").format(access, name, role))
         db.execute(
             sql.SQL(
-                "GRANT DELETE ON model_connections, web_accounts, web_sessions, web_login_limits TO {}"
+                "GRANT DELETE ON model_connections, web_accounts, web_sessions, web_login_limits, knowledge_source_blocks, agent_templates TO {}"
             ).format(role)
         )
         # New personal web identities can be inserted only in the authenticated tenant.

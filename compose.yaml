@@ -46,5 +46,19 @@ services:
     depends_on:
       init: {condition: service_completed_successfully}
     command: ["python","-m","app.worker"]
+  practice:
+    build: .
+    restart: unless-stopped
+    environment: *runtime
+    depends_on:
+      init: {condition: service_completed_successfully}
+    command: ["python","-m","app.worker","--queues","practice"]
+  research:
+    build: .
+    restart: unless-stopped
+    environment: *runtime
+    depends_on:
+      init: {condition: service_completed_successfully}
+    command: ["python","-m","app.worker","--queues","research"]
 volumes:
   pgdata:

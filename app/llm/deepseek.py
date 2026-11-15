@@ -40,7 +40,7 @@ class DeepSeek:
 
     def payload(self, req, stream=False):
         guide = req.instructions
-        if req.mode == "json":
+        if req.mode == "json" and not req.context.get("research_selection"):
             guide += ' Return a JSON object: {"facts":{},"need":"","signals":[]}.'
         messages = [{"role": "system", "content": guide}, *req.history]
         if req.context:

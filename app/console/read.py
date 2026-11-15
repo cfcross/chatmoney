@@ -5,10 +5,11 @@ from fastapi import APIRouter, Query
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import and_, case, func, literal, or_, select
 from app import schema as s
-from app.catalog import RULES, TOOL_NAMES, agent, own_activity, own_sessions
+from app.catalog import RULES, TOOL_NAMES, agent, own_activity, own_sessions, product_tools
 from app.db import now, reject, row
 from app.http import Read, VIEW
 from app.knowledge import book
+from app import knowledge_upload as up
 from app.settings import settings
 from app.team import TEAM
 from app.web_identity import can_issue_members, workspace_context
@@ -472,6 +473,7 @@ def workspace(call: Read):
                 for k, (wf, signals) in RULES.items()
             },
             tools=sorted(TOOL_NAMES),
+            tools_by_product=product_tools(c, w.tenant, w.products),
             model=cfg.llm_backend,
             model_configured=cfg.llm_backend == "mock"
             or bool(
@@ -495,7 +497,7 @@ def workspace(call: Read):
 
 
 @router.get("/documents/{document_id}")
-def preview(document_id: str, call: Read):
+def preview(document_id: str, call: Read, offset: int = Query(0, ge=0, le=up.FILE_LIMIT)):
     def view(c, w):
         d = row(c, s.docs, w.tenant, document_id)
         k = book(c, w, d.kb_id)
@@ -512,8 +514,25 @@ def preview(document_id: str, call: Read):
                 or not any(x["document_id"] == d.id for x in published)
             ):
                 reject(404, "NOT_FOUND", "当前身份不可查看该资料")
-        return 200, dict(
-            title=d.title, text=d.original, source=d.source_note, revision=d.revision
-        )
+        total = d.size_bytes if d.size_bytes is not None else len(d.original.encode("utf-8"))
+        if total > up.INLINE:
+            if offset > total:
+                reject(422, "INVALID_OFFSET", "原文页码超出范围。")
+            number, skip = divmod(offset, up.BLOCK)
+            data = b"".join(up.blocks(c, w.tenant, d.id, number, 2))[skip:skip+32768]
+            # Generated cursors always point at a UTF-8 character boundary.
+            import codecs
+            dec = codecs.getincrementaldecoder("utf-8-sig" if offset == 0 else "utf-8")()
+            try:
+                body = dec.decode(data, final=(offset+len(data) == total))
+            except UnicodeDecodeError:
+                reject(422, "INVALID_OFFSET", "请使用上一页提供的原文位置。")
+            end = offset + len(data) - len(dec.getstate()[0])
+            more = end if end < total else None
+        else:
+            body, more = d.original, None
+        return 200, dict(title=d.title, text=body, source=d.source_note, revision=d.revision,
+                         size_bytes=total, original_name=d.original_name, next_offset=more,
+                         partial_index=total > up.INDEX_LIMIT)
 
     return call.execute(AGENTS, view)
