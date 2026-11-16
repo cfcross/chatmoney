@@ -23,7 +23,8 @@ Healing-Fun 的自动化营销 agent 平台，由一套共享引擎和两条业�
 ## 3. 目录与归属
 
 ```
-AGENTS.md              本文件
+README.md              给人看的项目说明与当前状态
+AGENTS.md              本文件：规则与红线
 docs/
   ROADMAP.md           阶段计划与验收门（唯一进度来源）
   research/            脱敏后的调研与审阅记录
@@ -90,3 +91,4 @@ Conventional Commits，type 只用 `feat` `fix` `refactor` `perf` `docs` `test` 
 | 日期 | 改动 | 原因 |
 |---|---|---|
 | 2026-11-16 | 首版：平台定位、红线、命令与基线、本文件的自维护权限 | 仓库尚无 `AGENTS.md`，接手者没有共同基线 |
+| 2026-11-16 | 目录布局补 `README.md` | 新增面向人的项目说明，需与本文件的分工表述保持一致 |
