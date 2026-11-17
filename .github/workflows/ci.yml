@@ -1,0 +1,64 @@
+name: ChatMoney CI
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  postgres:
+    name: PostgreSQL 17 / pytest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      LLM_BACKEND: mock
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: ci-${{ github.run_id }}-${{ github.run_attempt }}
+        ports:
+          - "127.0.0.1:55432:5432"
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - run: python -m pip install -r requirements-dev.txt
+      - name: Prepare dedicated database and two restricted logins
+        env:
+          PGPASSWORD: ci-${{ github.run_id }}-${{ github.run_attempt }}
+        run: python -m scripts.ci_database
+      - name: Apply migrations and runtime privileges
+        run: python -m scripts.bootstrap
+      - name: Run the complete offline test suite
+        env:
+          PYTHONPATH: ${{ github.workspace }}/scripts/ci_offline:${{ github.workspace }}
+        run: |
+          python -m pytest -q --strict-markers --junitxml="$RUNNER_TEMP/pytest.xml" tests
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from xml.etree.ElementTree import parse
+
+          suites = parse(Path(os.environ["RUNNER_TEMP"]) / "pytest.xml").findall(".//testsuite")
+          if not sum(int(suite.get("tests", 0)) for suite in suites):
+              raise SystemExit("The required test suite collected no tests.")
+          for suite in suites:
+              if any(int(suite.get(key, 0)) for key in ("errors", "failures", "skipped")):
+                  raise SystemExit("The complete regression must pass without omitted cases.")
+          PY

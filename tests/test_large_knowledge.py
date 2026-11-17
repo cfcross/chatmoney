@@ -60,7 +60,7 @@ def test_rejected_source_creates_no_document(env,name,body):
 
 def test_quota_slot_and_disk_fail_before_mutation(env,monkeypatch):
     kb=make_book(env)
-    with up.upload_slot():
+    with up.upload_slot("tob"):
         assert upload(env,kb,b"hello").status_code==429
     monkeypatch.setattr(up.settings(),"upload_actor_bytes",2)
     assert upload(env,kb,b"hello").json()["error"]["code"]=="STORAGE_QUOTA"
@@ -93,7 +93,7 @@ def test_other_agent_can_run_while_upload_slot_is_occupied(env):
     from tests.test_workflows import prepare, plan
     from app import workflows
     _, sid = prepare(env)
-    with up.upload_slot():
+    with up.upload_slot("tob"):
         result = workflows.drive(plan(env, "tob", sid, "请给正式报价"), sid)
     assert result["action"] == "handoff" and result["delivery"] == "not_sent"
 

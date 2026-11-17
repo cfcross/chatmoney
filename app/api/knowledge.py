@@ -29,7 +29,7 @@ async def upload_document(id: str, request: Request, call: Write):
         with transaction(call.identity.tenant) as c:
             k.book(c, call.identity, id)
     await run_in_threadpool(check_book)
-    slot = up.upload_slot()
+    slot = up.upload_slot(call.identity.tenant)
     await run_in_threadpool(slot.__enter__)
     try:
         form, size, digest = await up.receive_form(request)

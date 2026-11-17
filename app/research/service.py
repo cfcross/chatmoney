@@ -35,19 +35,41 @@ def items(c, tab, t, *cond, limit=100):
     )
 
 
-def source_info(r):
-    return dict(
+def source_info(r, *, include_policy=False):
+    info = dict(
         id=r.id,
         name=r.name,
         base_url=r.base_url,
         status=r.status if r.expires > now() else "expired",
         expires=r.expires.isoformat(),
-        policy=r.policy,
     )
+    if include_policy:
+        info["policy"] = r.policy
+    return info
 
 
-def sources(c, w):
-    return {"items": [source_info(r) for r in items(c, s.research_sources, w.tenant)]}
+def sources(c, w, agent_id=None, *, management=False):
+    w.require(*OWNER)
+    staff = bool(w.roles & {"config", "publish"})
+    source = s.research_sources
+    conditions = []
+    if not staff:
+        grant, agent, practice = s.research_grants.c, s.agents.c, s.practice.c
+        approved = select(grant.source_id).where(
+            grant.tenant == w.tenant, grant.owner_id == w.actor, grant.status == "approved",
+            agent.tenant == grant.tenant, agent.id == grant.agent_id, agent.owner_id == w.actor,
+            agent.published == grant.version, agent.product_id.in_(w.products),
+            agent.disabled.is_(False), agent.deleted_at.is_(None),
+            practice.tenant == grant.tenant, practice.id == grant.practice_id,
+            practice.agent_id == agent.id, practice.owner_id == w.actor,
+            practice.fingerprint == grant.fingerprint, practice.candidate == "pending_platform",
+            practice.review == "satisfied",
+        )
+        if agent_id is not None:
+            approved = approved.where(grant.agent_id == agent_id)
+        conditions = [source.c.id.in_(approved), source.c.status == "active", source.c.expires > now()]
+    rows = items(c, source, w.tenant, *conditions)
+    return {"items": [source_info(r, include_policy=staff and management) for r in rows]}
 
 
 def create_source(c, w, b):
@@ -315,6 +337,8 @@ def grants(c, w, aid=None):
         own(c, w, aid)
     cond = [t.c.agent_id == aid, t.c.owner_id == w.actor] if aid else []
     out = []
+    staff = bool(w.roles & {"config", "publish"})
+    visible = set() if staff else {r["id"] for r in sources(c, w, aid)["items"]}
     for g in items(c, t, w.tenant, *cond):
         a = row(c, s.agents, w.tenant, g.agent_id)
         if a.product_id not in w.products:
@@ -326,10 +350,10 @@ def grants(c, w, aid=None):
                 agent=a.name,
                 agent_id=a.id,
                 version=g.version,
-                source=src.name,
+                source=src.name if staff or src.id in visible else "已申请的来源",
                 source_id=src.id,
                 status=g.status,
-                scope=src.base_url,
+                scope=src.base_url if staff or src.id in visible else None,
                 reason=g.reason,
             )
         )
@@ -367,7 +391,7 @@ def dashboard(c, w, aid):
         product_id=a.product_id,
         version=a.published,
         grants=grants(c, w, aid),
-        sources=sources(c, w)["items"],
+        sources=sources(c, w, aid)["items"],
         jobs=[
             brief(j)
             for j in items(c, t, w.tenant, t.c.owner_id == w.actor, t.c.agent_id == aid)

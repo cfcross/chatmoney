@@ -223,7 +223,7 @@ class Worker:
 
     def tick(self):
         with engine().connect() as c:
-            tenants = c.scalars(text("SELECT * FROM public.worker_tenants()")).all()
+            tenants = c.scalars(text("SELECT * FROM public.worker_tenants() ORDER BY 1")).all()
         # Rotate tenant and queue priority for independently scheduled business lanes.
         lanes = [(t, q) for q in self.queues for t in tenants]
         for i in range(len(lanes)):

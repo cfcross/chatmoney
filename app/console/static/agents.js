@@ -126,7 +126,7 @@ export async function agents(n, parts) {
         has("own_agents")
           ? "这里显示你创建的助手。点击“创建助手”设置名称、角色和产品资料。"
           : "按产品配置角色。已发布的版本可以用于新任务。",
-        (has("publish") ? link("研究来源与授权","agents/research-policy","btn","登记来源许可、审批助手的只读研究权限") : "") +
+        ((has("config") || has("publish")) ? link("研究来源与授权","agents/research-policy","btn","登记来源许可、审批助手的只读研究权限") : "") +
         (has("publish") ? link("启用审核", "agents/candidates", "btn", "审阅已提交的配置，不授予平台权限") : "") +
         (state.ws.manage_models
           ? link(

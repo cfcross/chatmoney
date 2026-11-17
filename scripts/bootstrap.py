@@ -94,6 +94,8 @@ def main():
                 "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {}"
             ).format(role)
         )
+        # Tenant lock identifiers are allocated only when the tenant owner inserts a tenant.
+        db.execute(sql.SQL("REVOKE ALL ON SEQUENCE tenants_upload_lock_key_seq FROM {}").format(role))
     print("Database migrations, checkpoints and runtime privileges ready.")
 
 

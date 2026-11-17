@@ -1,6 +1,7 @@
 """Durable, two-stage research graph. No live sales Session is created."""
 
 import logging
+from random import uniform
 from contextlib import contextmanager
 from datetime import timedelta
 from typing import TypedDict
@@ -99,6 +100,30 @@ class Execution:
             return {"stage": j.status}
 
     def fetch(self, _):
+        # One physical connection protects the website read and capture commit. PostgreSQL
+        # releases this transaction lock on rollback or disconnect, including worker death.
+        with engine().begin() as host_guard:
+            with self.tx() as (c, job, _, __):
+                if job.status != "queued":
+                    raise Stale()
+                hostname = urlsplit(job.target).hostname
+                acquired = host_guard.scalar(
+                    text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key, 0))"),
+                    {"key": "company-research-host:" + hostname},
+                )
+                if not acquired:
+                    events = job.events
+                    if not events or events[-1]["kind"] != "site_wait":
+                        events = events + [svc.event("site_wait")]
+                    update(c, s.research_jobs, job.tenant, job.id,
+                           lease=None, lease_until=now() + timedelta(seconds=uniform(4, 8)),
+                           updated=now(), events=events)
+                    return {"stage": "queued"}
+                update(c, s.research_jobs, job.tenant, job.id, status="fetching",
+                       updated=now(), events=job.events + [svc.event("claimed")])
+            return self.capture()
+
+    def capture(self):
         raw = Gateway().research(self)
         with self.tx() as (c, j, _, src):
             cap = assessment.collect(raw, src)
@@ -172,7 +197,10 @@ class Execution:
             lambda x: "analyze" if x["stage"] == "captured" else "read",
             ["read", "analyze"],
         )
-        graph.add_edge("read", "analyze")
+        graph.add_conditional_edges(
+            "read", lambda state: "analyze" if state["stage"] == "captured" else END,
+            ["analyze", END],
+        )
         graph.add_edge("analyze", END)
         graph.compile().invoke({"stage": ""})
 
@@ -188,14 +216,15 @@ def tick(t, model=None):
                 .where(
                     tab.c.tenant == t,
                     or_(
-                        tab.c.status == "queued",
+                        and_(tab.c.status == "queued",
+                             or_(tab.c.lease_until.is_(None), tab.c.lease_until <= now())),
                         and_(
                             tab.c.status.in_(["fetching", "captured", "model_started"]),
                             tab.c.lease_until <= now(),
                         ),
                     ),
                 )
-                .order_by(tab.c.created)
+                .order_by(tab.c.created, tab.c.id)
                 .limit(1)
                 .with_for_update(skip_locked=True)
             )
@@ -227,27 +256,12 @@ def tick(t, model=None):
             t,
             j.id,
             lease=lease,
-            status="captured" if j.status == "captured" else "fetching",
             lease_until=now() + timedelta(seconds=180),
             updated=now(),
-            events=j.events + [svc.event("claimed")],
         )
     ex = Execution(t, j.id, lease, model)
     try:
-        domain = urlsplit(j.target).hostname
-        with engine().connect() as guard:
-            key = "company-research-host:" + domain
-            if not guard.scalar(
-                text("SELECT pg_try_advisory_lock(hashtextextended(:k,0))"), {"k": key}
-            ):
-                raise Denied("BUSY")
-            try:
-                ex.drive()
-            finally:
-                guard.execute(
-                    text("SELECT pg_advisory_unlock(hashtextextended(:k,0))"),
-                    {"k": key},
-                )
+        ex.drive()
     except Stale:
         pass
     except Exception as e:

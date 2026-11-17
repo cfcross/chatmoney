@@ -66,6 +66,7 @@ tenants = Table(
     Column("id", Text, primary_key=True),
     col("name"),
     col("company_ref"),
+    Column("upload_lock_key", Integer, Identity(always=True), nullable=False, unique=True),
 )
 identities = table(
     "identities",

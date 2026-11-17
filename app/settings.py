@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     upload_actor_bytes: int = Field(2_000_000_000, ge=1_000_000_000)
     upload_workspace_bytes: int = Field(4_000_000_000, ge=1_000_000_000)
     upload_concurrency: int = Field(1, ge=1, le=4)
+    upload_total_timeout_seconds: int = Field(3600, ge=1, le=86400)
+    upload_idle_timeout_seconds: int = Field(120, ge=1, le=3600)
     upload_disk_reserve_bytes: int = Field(512_000_000, ge=100_000_000)
     model_config = SettingsConfigDict(extra="ignore")
     database_url: SecretStr

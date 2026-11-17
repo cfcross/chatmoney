@@ -143,9 +143,13 @@ def exercise(
         b.click('dialog [name="' + k + '"]')
     dlg()
     b.text("验收专用公开样本")
+    src = next(item for item in api(b, B + "research-sources")["data"]["items"] if item["base_url"] == scope)
+    b.text(src["id"])
     assert api(b, B + "agents/" + a + "/research").get("status") == 404
     login(member, mempw)
     nav("agents/research/" + a, "申请启用企业研究工具")
+    assert not api(b, B + "research-sources")["data"]["items"]
+    b.fill("source_ref", src["id"])
     b.button("申请启用企业研究工具")
     b.text("待审批")
     dash = api(b, B + "agents/" + a + "/research")["data"]
@@ -166,6 +170,8 @@ def exercise(
     b.text("只读已授权")
     login(member, mempw)
     nav("agents/research/" + a, "已获准使用")
+    visible = api(b, B + "research-sources")["data"]["items"]
+    assert any(item["id"] == src["id"] for item in visible) and all("policy" not in item for item in visible)
     if online:
         b.size(1280,720)
         b.capture("public-approved-controls")

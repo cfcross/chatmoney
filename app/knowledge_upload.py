@@ -17,7 +17,7 @@ from starlette.requests import ClientDisconnect
 from python_multipart.multipart import parse_options_header
 
 from app import schema as s
-from app.db import engine, reject
+from app.db import engine, reject, scope
 from app.settings import settings
 
 FILE_LIMIT = 1_000_000_000
@@ -51,18 +51,34 @@ def filename_ok(name):
 
 
 @contextmanager
-def upload_slot():
-    # PostgreSQL owns the lock and releases it on connection loss, across API processes.
-    with engine().connect().execution_options(isolation_level="AUTOCOMMIT") as c:
+def upload_slot(tenant: str):
+    with engine().connect() as conn:
+        with conn.begin():
+            scope(conn, tenant)
+            namespace = conn.execute(
+                select(s.tenants.c.upload_lock_key).where(s.tenants.c.id == tenant)
+            ).scalar_one()
+        # Two int4 keys, disjoint from the bigint locks used by the workers. The
+        # database assigns the first key uniquely even for arbitrary text tenant IDs.
+        conn.execution_options(isolation_level="AUTOCOMMIT")
         for slot in range(settings().upload_concurrency):
-            key = {"slot": slot}
-            if c.scalar(text("SELECT pg_try_advisory_lock(173184527,:slot)"), key):
+            key = {"namespace": -namespace, "slot": slot}
+            try:
+                acquired = conn.scalar(text("SELECT pg_try_advisory_lock(:namespace,:slot)"), key)
+            except BaseException:
+                conn.invalidate()
+                raise
+            if acquired:
                 try:
                     yield
                 finally:
-                    c.execute(text("SELECT pg_advisory_unlock(173184527,:slot)"), key)
+                    try:
+                        conn.execute(text("SELECT pg_advisory_unlock(:namespace,:slot)"), key)
+                    except BaseException:
+                        conn.invalidate()
+                        raise
                 return
-        reject(429, "UPLOAD_BUSY", "已有文件正在上传，请稍后重试。")
+        reject(429, "UPLOAD_BUSY", "本工作区的上传名额已用完，请稍后重试。")
 
 
 class Intake(MultiPartParser):
@@ -145,29 +161,40 @@ async def receive_form(request):
     space(min(FILE_LIMIT, int(length or 0)) * 3)
     async def stream():
         received = 0
-        start = monotonic()
+        cfg = settings()
+        deadline = monotonic() + cfg.upload_total_timeout_seconds
+        idle_deadline = monotonic() + cfg.upload_idle_timeout_seconds
         source = request.stream().__aiter__()
         while True:
+            remaining = min(deadline, idle_deadline) - monotonic()
+            if remaining <= 0:
+                raise TimeoutError
             try:
-                with anyio.fail_after(min(120, max(0, 7200 - (monotonic()-start)))):
+                with anyio.fail_after(remaining):
                     data = await anext(source)
             except StopAsyncIteration:
                 return
+            arrived = monotonic()
+            if arrived >= min(deadline, idle_deadline):
+                raise TimeoutError
+            if data:
+                idle_deadline = arrived + cfg.upload_idle_timeout_seconds
             received += len(data)
             if received > FILE_LIMIT + ENVELOPE:
                 size_error()
             for i in range(0, len(data), BLOCK):
+                if monotonic() >= deadline:
+                    raise TimeoutError
                 yield data[i:i+BLOCK]
 
     parser = Intake(request.headers, stream())
+    delivered = False
     try:
         form = await parser.parse()
         if not parser.finished or len(form) != len(form.multi_items()) or "file" not in form:
             await form.close()
-            # An unfinished part is not in FormData. Close its spooled source as well.
-            for raw_file in parser._files_to_close_on_error:
-                raw_file.close()
             reject(422, "INVALID_UPLOAD", "文件上传不完整或字段重复，请重新上传。")
+        delivered = True
         return form, parser.size, parser.hash.hexdigest()
     except (ClientDisconnect, TimeoutError):
         reject(408, "UPLOAD_INTERRUPTED", "上传中断或超时，请重新上传。")
@@ -177,6 +204,10 @@ async def receive_form(request):
         if exc.errno in (errno.ENOSPC, getattr(errno, "EDQUOT", -1)):
             reject(507, "STORAGE_FULL", SPACE_ERROR)
         raise
+    finally:
+        if not delivered:
+            for upload_file in parser._files_to_close_on_error:
+                upload_file.close()
 
 
 def check_quota(c, tenant, actor, incoming):

@@ -10,7 +10,7 @@ router = APIRouter(prefix="/console/manage", include_in_schema=False)
 
 @router.get("/research-sources")
 def sources(call: Read):
-    return call.execute(svc.OWNER, lambda c, w: (200, svc.sources(c, w)))
+    return call.execute(svc.OWNER, lambda c, w: (200, svc.sources(c, w, management=True)))
 
 
 @router.post("/research-sources")
